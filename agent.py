@@ -1,10 +1,16 @@
+from fn import to_bin
 import time
 import random
+from gym.spaces.multi_binary import MultiBinary
 import numpy as np
 from collections import deque
-import tensorflow as tf
+import tensorflow
 from matplotlib import pyplot as plt
+from process_frame import process_frame
 
+
+tf = tensorflow.compat.v1
+tf.disable_eager_execution()
 
 class DQNAgent:
     """ DQN agent """
@@ -32,27 +38,29 @@ class DQNAgent:
 
     def build_model(self):
         """ Model builder function """
-        self.input = tf.placeholder(dtype=tf.float32, shape=(None, ) + self.states, name='input')
         self.q_true = tf.placeholder(dtype=tf.float32, shape=[None], name='labels')
         self.a_true = tf.placeholder(dtype=tf.int32, shape=[None], name='actions')
         self.reward = tf.placeholder(dtype=tf.float32, shape=[], name='reward')
-        self.input_float = tf.to_float(self.input) / 255.
+        self.input = tf.placeholder(dtype=tf.float32, shape=(None, ) + self.states, name='input')
+        # self.input_float = tf.to_float(self.input) / 255.
+        # self.input_float = tf.convert_to_tensor(self.input_float[:,:,:3])
+
         # Online network
         with tf.variable_scope('online'):
-            self.conv_1 = tf.layers.conv2d(inputs=self.input_float, filters=32, kernel_size=8, strides=4, activation=tf.nn.relu)
-            self.conv_2 = tf.layers.conv2d(inputs=self.conv_1, filters=64, kernel_size=4, strides=2, activation=tf.nn.relu)
-            self.conv_3 = tf.layers.conv2d(inputs=self.conv_2, filters=64, kernel_size=3, strides=1, activation=tf.nn.relu)
+            self.conv_1 = tf.layers.conv2d(inputs=self.input, filters=32, kernel_size=3, strides=4, activation=tf.nn.relu)
+            self.conv_2 = tf.layers.conv2d(inputs=self.conv_1, filters=64, kernel_size=1, strides=2, activation=tf.nn.relu)
+            self.conv_3 = tf.layers.conv2d(inputs=self.conv_2, filters=64, kernel_size=1, strides=1, activation=tf.nn.relu)
             self.flatten = tf.layers.flatten(inputs=self.conv_3)
             self.dense = tf.layers.dense(inputs=self.flatten, units=512, activation=tf.nn.relu)
-            self.output = tf.layers.dense(inputs=self.dense, units=self.actions, name='output')
+            self.output = tf.layers.dense(inputs=self.dense, units=len(self.actions), name='output')
         # Target network
         with tf.variable_scope('target'):
-            self.conv_1_target = tf.layers.conv2d(inputs=self.input_float, filters=32, kernel_size=8, strides=4, activation=tf.nn.relu)
-            self.conv_2_target = tf.layers.conv2d(inputs=self.conv_1_target, filters=64, kernel_size=4, strides=2, activation=tf.nn.relu)
-            self.conv_3_target = tf.layers.conv2d(inputs=self.conv_2_target, filters=64, kernel_size=3, strides=1, activation=tf.nn.relu)
+            self.conv_1_target = tf.layers.conv2d(inputs=self.input, filters=32, kernel_size=3, strides=4, activation=tf.nn.relu)
+            self.conv_2_target = tf.layers.conv2d(inputs=self.conv_1_target, filters=64, kernel_size=1, strides=2, activation=tf.nn.relu)
+            self.conv_3_target = tf.layers.conv2d(inputs=self.conv_2_target, filters=64, kernel_size=1, strides=1, activation=tf.nn.relu)
             self.flatten_target = tf.layers.flatten(inputs=self.conv_3_target)
             self.dense_target = tf.layers.dense(inputs=self.flatten_target, units=512, activation=tf.nn.relu)
-            self.output_target = tf.stop_gradient(tf.layers.dense(inputs=self.dense_target, units=self.actions, name='output_target'))
+            self.output_target = tf.stop_gradient(tf.layers.dense(inputs=self.flatten_target, units=len(self.actions), name='output_target'))
         # Optimizer
         self.action = tf.argmax(input=self.output, axis=1)
         self.q_pred = tf.gather_nd(params=self.output, indices=tf.stack([tf.range(tf.shape(self.a_true)[0]), self.a_true], axis=1))
@@ -89,11 +97,13 @@ class DQNAgent:
         """ Perform action """
         if np.random.rand() < self.eps:
             # Random action
-            action = np.random.randint(low=0, high=self.actions)
+            action = self.actions[random.randint(0, len(self.actions))]
+            action = to_bin(action)
         else:
             # Policy action
             q = self.predict('online', np.expand_dims(state, 0))
             action = np.argmax(q)
+            action = to_bin(np.argmax(q))
         # Decrease eps
         self.eps *= self.eps_decay
         self.eps = max(self.eps_min, self.eps)
@@ -118,7 +128,7 @@ class DQNAgent:
             return
         # Sample batch
         batch = random.sample(self.memory, self.batch_size)
-        state, next_state, action, reward, done = map(np.array, zip(*batch))
+        state, next_state, action, reward, done, info = map(np.array, zip(*batch))
         # Get next q values from target network
         next_q = self.predict('target', next_state)
         # Calculate discounted future reward
@@ -147,7 +157,7 @@ class DQNAgent:
         input = graph.get_tensor_by_name('input:0')
         output = graph.get_tensor_by_name('online/output/BiasAdd:0')
         # Replay RL agent
-        state = env.reset()
+        state = process_frame(env.reset())
         total_reward = 0
         with tf.Session() as sess:
             saver.restore(sess, ckpt)
@@ -161,17 +171,15 @@ class DQNAgent:
                         if step % 100 == 0:
                             self.visualize_layer(session=sess, layer=self.conv_2, state=state, step=step)
                     # Action
-                    if np.random.rand() < 0.0:
-                        action = np.random.randint(low=0, high=self.actions, size=1)[0]
+                    if np.random.rand() <= 0:
+                        action = self.actions.sample()
                     else:
                         q = sess.run(fetches=output, feed_dict={input: np.expand_dims(state, 0)})
-                        action = np.argmax(q)
+                        action = to_bin(np.argmax(q))
                     next_state, reward, done, info = env.step(action)
                     total_reward += reward
-                    state = next_state
+                    state = process_frame(next_state)
                     step += 1
-                    if info['flag_get']:
-                        break
                     if done:
                         break
         env.close()
